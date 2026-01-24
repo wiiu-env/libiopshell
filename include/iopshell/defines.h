@@ -4,8 +4,8 @@
 
 typedef void (*IOPShell_CommandCallback)(int argc, char **argv);
 
-#define IOPSHELL_MAX_CMD_NAME 32
-#define IOPSHELL_MAX_CMD_DESC 128
+#define IOPSHELL_MAX_CMD_NAME  32
+#define IOPSHELL_MAX_CMD_DESC  128
 #define IOPSHELL_MAX_CMD_USAGE 128
 
 typedef struct {
@@ -25,6 +25,7 @@ typedef enum IOPShellModule_Error {
     IOPSHELL_MODULE_ERROR_UNSUPPORTED_COMMAND     = -6,
     IOPSHELL_MODULE_ERROR_LIB_UNINITIALIZED       = -7,
     IOPSHELL_MODULE_ERROR_ALREADY_EXISTS          = -8,
+    IOPSHELL_MODULE_ERROR_UNKNOWN_OR_FOREIGN_CMD  = -9,
     IOPSHELL_MODULE_ERROR_UNKNOWN_ERROR           = -0xFF,
 } IOPShellModule_Error;
 

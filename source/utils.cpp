@@ -1,11 +1,11 @@
 #include "logger.h"
-#include <algorithm>
 #include <coreinit/debug.h>
 #include <coreinit/dynload.h>
-#include <cstdarg>
+#include <coreinit/mutex.h>
+#include <cstdlib>
+#include <cstring>
 #include <iopshell/api.h>
 #include <iopshell/defines.h>
-#include <mutex>
 
 static OSDynLoad_Module sModuleHandle = nullptr;
 
@@ -14,12 +14,70 @@ static IOPShellModule_Error (*sISMListCommands)(IOPShellModule_CommandEntry *out
 static IOPShellModule_Error (*sISMAddCommand)(const char *cmdName, IOPShell_CommandCallback cb, const char *description, const char *usage) = nullptr;
 static IOPShellModule_Error (*sISMRemoveCommand)(const char *cmdName)                                                                       = nullptr;
 
-static bool sLibInitDone = false;
-
+static bool sLibInitDone                                = false;
 static IOPShellModule_APIVersion sIOPShellModuleVersion = IOPSHELL_MODULE_API_VERSION_ERROR;
 
-static std::vector<std::string> sRegisteredCommands;
-static std::recursive_mutex sTrackingMutex;
+// ----------------------------------------------------------------------
+// Manual Command Tracking (Replaces std::vector<std::string>)
+// ----------------------------------------------------------------------
+
+struct CommandNode {
+    char *name;
+    CommandNode *next;
+};
+
+static CommandNode *sCommandList = nullptr;
+static OSMutex sTrackingMutex;
+
+// Helper to add a name to the list
+static void TrackCommand(const char *name) {
+    if (!name) return;
+
+    const size_t len = std::strlen(name);
+    char *copy = static_cast<char *>(std::malloc(len + 1));
+    if (!copy) return;
+    std::strcpy(copy, name);
+
+    const auto node = static_cast<CommandNode *>(std::malloc(sizeof(CommandNode)));
+    if (!node) {
+        std::free(copy);
+        return;
+    }
+
+    node->name   = copy;
+    node->next   = sCommandList;
+    sCommandList = node;
+}
+
+// Helper to remove a name from the list
+static void UntrackCommand(const char *name) {
+    if (!name || !sCommandList) return;
+
+    CommandNode *curr = sCommandList;
+    CommandNode *prev = nullptr;
+
+    while (curr) {
+        if (std::strcmp(curr->name, name) == 0) {
+            // Found it, unlink
+            if (prev) {
+                prev->next = curr->next;
+            } else {
+                sCommandList = curr->next;
+            }
+
+            // Free memory
+            std::free(curr->name);
+            std::free(curr);
+            return;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+}
+
+// ----------------------------------------------------------------------
+// Implementation
+// ----------------------------------------------------------------------
 
 const char *IOPShellModule_GetStatusStr(const IOPShellModule_Error status) {
     switch (status) {
@@ -43,6 +101,8 @@ const char *IOPShellModule_GetStatusStr(const IOPShellModule_Error status) {
             return "IOPSHELL_MODULE_ERROR_HANDLE_NOT_FOUND";
         case IOPSHELL_MODULE_ERROR_ALREADY_EXISTS:
             return "IOPSHELL_MODULE_ERROR_ALREADY_EXISTS";
+        case IOPSHELL_MODULE_ERROR_UNKNOWN_OR_FOREIGN_CMD:
+            return "IOPSHELL_MODULE_ERROR_UNKNOWN_OR_FOREIGN_CMD";
     }
     return "IOPSHELL_MODULE_ERROR_UNKNOWN_ERROR";
 }
@@ -78,12 +138,8 @@ IOPShellModule_Error IOPShellModule_InitLibrary() {
         sModuleHandle = nullptr;
         return IOPSHELL_MODULE_ERROR_UNSUPPORTED_API_VERSION;
     }
-
-    {
-        std::lock_guard lock(sTrackingMutex);
-        sRegisteredCommands.clear();
-    }
-
+    OSInitMutex(&sTrackingMutex);
+    sCommandList = nullptr;
     sLibInitDone = true;
     return IOPSHELL_MODULE_ERROR_SUCCESS;
 }
@@ -91,14 +147,23 @@ IOPShellModule_Error IOPShellModule_InitLibrary() {
 IOPShellModule_Error IOPShellModule_DeInitLibrary() {
     if (sLibInitDone) {
         {
-            std::lock_guard lock(sTrackingMutex);
+            OSLockMutex(&sTrackingMutex);
             if (sISMRemoveCommand) {
-                for (const auto &cmd : sRegisteredCommands) {
-                    DEBUG_FUNCTION_LINE_WARN("WARNING: Calling Deinit without removing command \"%s\" first", cmd.c_str());
-                    sISMRemoveCommand(cmd.c_str());
+                // Iterate through our manual list and remove commands
+                CommandNode *curr = sCommandList;
+                while (curr) {
+                    DEBUG_FUNCTION_LINE_WARN("WARNING: Calling Deinit without removing command \"%s\" first", curr->name);
+                    sISMRemoveCommand(curr->name);
+
+                    // Move to next and free current
+                    CommandNode *next = curr->next;
+                    std::free(curr->name);
+                    std::free(curr);
+                    curr = next;
                 }
+                sCommandList = nullptr;
             }
-            sRegisteredCommands.clear();
+            OSUnlockMutex(&sTrackingMutex);
         }
 
         sISMGetVersionFn       = nullptr;
@@ -146,17 +211,23 @@ IOPShellModule_Error IOPShellModule_AddCommand(const char *cmdName, IOPShell_Com
     const IOPShellModule_Error ret = sISMAddCommand(cmdName, cb, description, usage);
 
     if (ret == IOPSHELL_MODULE_ERROR_SUCCESS) {
-        std::lock_guard lock(sTrackingMutex);
-        bool found = false;
-        for (const auto &cmd : sRegisteredCommands) {
-            if (cmd == cmdName) {
+        OSLockMutex(&sTrackingMutex);
+
+        // Check if already in list to avoid duplicates
+        bool found        = false;
+        const CommandNode *curr = sCommandList;
+        while (curr) {
+            if (std::strcmp(curr->name, cmdName) == 0) {
                 found = true;
                 break;
             }
+            curr = curr->next;
         }
+
         if (!found) {
-            sRegisteredCommands.emplace_back(cmdName);
+            TrackCommand(cmdName);
         }
+        OSUnlockMutex(&sTrackingMutex);
     }
 
     return ret;
@@ -174,13 +245,32 @@ IOPShellModule_Error IOPShellModule_RemoveCommand(const char *cmdName) {
         return IOPSHELL_MODULE_ERROR_INVALID_ARGUMENT;
     }
 
+    {
+        OSLockMutex(&sTrackingMutex);
+        // Check if we added that command
+        bool found        = false;
+        const CommandNode *curr = sCommandList;
+        while (curr) {
+            if (std::strcmp(curr->name, cmdName) == 0) {
+                found = true;
+                break;
+            }
+            curr = curr->next;
+        }
+        OSUnlockMutex(&sTrackingMutex);
+
+        if (!found) {
+            // if not, don't even try to remove it.
+            return IOPSHELL_MODULE_ERROR_UNKNOWN_OR_FOREIGN_CMD;
+        }
+    }
+
     const IOPShellModule_Error ret = sISMRemoveCommand(cmdName);
 
     if (ret == IOPSHELL_MODULE_ERROR_SUCCESS) {
-        std::lock_guard lock(sTrackingMutex);
-        if (const auto it = std::ranges::remove(sRegisteredCommands, std::string(cmdName)).begin(); it != sRegisteredCommands.end()) {
-            sRegisteredCommands.erase(it, sRegisteredCommands.end());
-        }
+        OSLockMutex(&sTrackingMutex);
+        UntrackCommand(cmdName);
+        OSUnlockMutex(&sTrackingMutex);
     }
 
     return ret;
