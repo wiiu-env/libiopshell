@@ -210,9 +210,9 @@ namespace IOPShellModule {
         // --- Check Argument Ordering ---
         template<typename... Args>
         constexpr bool CheckOptionalOrdering() {
-            bool foundOptional = false;
-            bool valid         = true;
-            [[maybe_unused]] auto check         = [&](bool isOpt) {
+            bool foundOptional          = false;
+            bool valid                  = true;
+            [[maybe_unused]] auto check = [&](bool isOpt) {
                 if (foundOptional && !isOpt) {
                     valid = false;
                 }
@@ -753,6 +753,12 @@ namespace IOPShellModule {
         }
 
         /**
+         * @brief Registers a raw command handler (argc/argv) that can be a capturing lambda.
+         * Skips automatic argument parsing.
+         */
+        [[nodiscard]] static std::optional<Command> AddRaw(const char *name, std::function<void(int, char **)> handler, const char *description = nullptr, const char *usage = nullptr, IOPShellModule_Error *outError = nullptr);
+
+        /**
          * @brief Unregisters a command.
          * \see IOPShellModule_RemoveCommand
          */
@@ -820,6 +826,77 @@ namespace IOPShellModule {
             if (outError) *outError = res;
             return std::nullopt;
         }
+    };
+
+    /**
+     * @brief Manages a group of sub-commands under a single main command.
+     * Example: 'plugins help', 'plugins list'.
+     */
+    class CommandGroup {
+    public:
+        CommandGroup(std::string name, std::string description = "");
+        ~CommandGroup();
+
+        // Delete copy/move to ensure 'this' captured in Register() remains valid.
+        CommandGroup(const CommandGroup &) = delete;
+        CommandGroup &operator=(const CommandGroup &) = delete;
+
+        /**
+         * @brief Registers a raw command handler (argc/argv).
+         * Bypasses the library's automatic argument parsing and type deduction.
+         */
+        void AddRawCommand(const char *name, std::function<void(int, char **)> handler, const char *description = nullptr, const char *usage = nullptr) {
+            AddRawHandler(name, std::move(handler), description, usage ? usage : "");
+        }
+
+        /**
+         * @brief Registers a sub-command with automatic type deduction.
+         */
+        template<typename FuncT>
+        void AddCommand(const char *subCmdName, FuncT &&lambda, const char *description = nullptr) {
+            using Sig = typename internal::SignatureDeducer<std::decay_t<FuncT>>::Signature;
+            AddCommandExplicit<Sig>(subCmdName, std::forward<FuncT>(lambda), description);
+        }
+
+        /**
+         * @brief Registers a sub-command with an explicit signature.
+         */
+        template<typename Signature, typename FuncT>
+        void AddCommandExplicit(const char *subCmdName, FuncT &&lambda, const char *description = nullptr) {
+            using Traits = internal::FunctionTraits<Signature>;
+
+            auto shared_lambda = std::make_shared<std::decay_t<FuncT>>(std::forward<FuncT>(lambda));
+            auto handler       = [shared_lambda](int argc, char **argv) {
+                Traits::Call(*shared_lambda, argc, argv);
+            };
+
+            std::string usage = Traits::GetUsage(subCmdName);
+
+            AddRawHandler(subCmdName, std::move(handler), description, std::move(usage));
+        }
+
+        /**
+         * @brief Registers the MAIN command with the IOPShell.
+         * Call this after adding all sub-commands.
+         */
+        [[nodiscard]] std::optional<Command> Register();
+
+    private:
+        struct HelpEntry {
+            std::string desc;
+            std::string usage;
+        };
+
+        // Helper to keep implementation details out of the header template
+        void AddRawHandler(const char *name, std::function<void(int, char **)> handler, const char *desc, std::string usage);
+
+        void Dispatch(int argc, char **argv);
+        void PrintHelp();
+
+        std::string mName;
+        std::string mDescription;
+        std::map<std::string, std::function<void(int, char **)>> mHandlers;
+        std::map<std::string, HelpEntry> mHelp;
     };
 
 } // namespace IOPShellModule

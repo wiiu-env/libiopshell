@@ -34,7 +34,7 @@ static void TrackCommand(const char *name) {
     if (!name) return;
 
     const size_t len = std::strlen(name);
-    char *copy = static_cast<char *>(std::malloc(len + 1));
+    char *copy       = static_cast<char *>(std::malloc(len + 1));
     if (!copy) return;
     std::strcpy(copy, name);
 
@@ -214,7 +214,7 @@ IOPShellModule_Error IOPShellModule_AddCommand(const char *cmdName, IOPShell_Com
         OSLockMutex(&sTrackingMutex);
 
         // Check if already in list to avoid duplicates
-        bool found        = false;
+        bool found              = false;
         const CommandNode *curr = sCommandList;
         while (curr) {
             if (std::strcmp(curr->name, cmdName) == 0) {
@@ -248,7 +248,7 @@ IOPShellModule_Error IOPShellModule_RemoveCommand(const char *cmdName) {
     {
         OSLockMutex(&sTrackingMutex);
         // Check if we added that command
-        bool found        = false;
+        bool found              = false;
         const CommandNode *curr = sCommandList;
         while (curr) {
             if (std::strcmp(curr->name, cmdName) == 0) {

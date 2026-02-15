@@ -195,4 +195,89 @@ namespace IOPShellModule {
             return tokens;
         }
     } // namespace internal
+
+    std::optional<Command> CommandRegistry::AddRaw(const char *name, std::function<void(int, char **)> handler, const char *description, const char *usage, IOPShellModule_Error *outError) {
+        // Store the C++ handler in the map
+        {
+            std::lock_guard lock(GetMutex());
+            GetHandlerMap()[name] = std::move(handler);
+        }
+
+        // Register the Global Dispatcher with the C API
+        // This dispatcher looks up the handler in the map and calls it.
+        IOPShellModule_Error res = IOPShellModule_AddCommand(name, &GlobalLambdaDispatcher, description, usage);
+
+        if (res == IOPSHELL_MODULE_ERROR_SUCCESS) {
+            if (outError) *outError = IOPSHELL_MODULE_ERROR_SUCCESS;
+            return Command(name); // CommandRegistry is a friend of Command, so this works
+        }
+
+        // Cleanup if registration failed
+        {
+            std::lock_guard lock(GetMutex());
+            GetHandlerMap().erase(name);
+        }
+
+        if (outError) *outError = res;
+        return std::nullopt;
+    }
+
+    CommandGroup::CommandGroup(std::string name, std::string description)
+        : mName(std::move(name)), mDescription(std::move(description)) {}
+
+    CommandGroup::~CommandGroup() = default;
+
+    void CommandGroup::AddRawHandler(const char *name, std::function<void(int, char **)> handler, const char *desc, std::string usage) {
+        if (!name) return;
+        mHandlers[name] = std::move(handler);
+        mHelp[name]     = {desc ? desc : "", std::move(usage)};
+    }
+
+    std::optional<Command> CommandGroup::Register() {
+        // Use AddRaw to register the lambda with skipped template deduction and argument parsing logic.
+        return CommandRegistry::AddRaw(
+                mName.c_str(), [this](int argc, char **argv) {
+                    this->Dispatch(argc, argv);
+                },
+                mDescription.c_str(), (std::string("Type '") + mName + " help' to see subcommands.").c_str());
+    }
+
+    void CommandGroup::Dispatch(int argc, char **argv) {
+        // argv[0] is the main command (e.g., "plugins")
+        // argv[1] is the sub-command (e.g., "show")
+
+        if (argc < 2) {
+            PrintHelp();
+            return;
+        }
+
+        std::string sub = argv[1];
+
+        // Built-in help check
+        if (sub == "help" || sub == "--help" || sub == "-h") {
+            PrintHelp();
+            return;
+        }
+
+        auto it = mHandlers.find(sub);
+        if (it != mHandlers.end()) {
+            // Shift arguments:
+            // Sub-command handler expects argv[0] to be its own name
+            // "plugins show 123" -> "show 123"
+            it->second(argc - 1, argv + 1);
+        } else {
+            OSReport("Unknown subcommand '%s'. Try '%s help'.\n", sub.c_str(), mName.c_str());
+        }
+    }
+
+    void CommandGroup::PrintHelp() {
+        OSReport("Usage: aroma %s <subcommand> [args]\n", mName.c_str());
+        OSReport("Subcommands:\n");
+
+        for (const auto &[name, info] : mHelp) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "  %-20s %-20s %s", name.c_str(), info.desc.c_str(), info.usage.c_str());
+            OSReport("\t - %s\n", buf);
+        }
+    }
 } // namespace IOPShellModule

@@ -217,6 +217,39 @@ void Init() {
 }
 ```
 
+#### 5. Command Groups (Sub-commands)
+
+You can organize related commands under a single parent command using `CommandGroup`. This creates a structure similar
+to CLI tools (e.g., `git commit`, `git push`).
+
+**Note:** The `CommandGroup` object stores the sub-command handlers internally. It must **remain alive** (e.g., static
+or heap-allocated) for as long as the command is registered.
+
+```
+// 1. Define the Group (Must be persistent)
+static IOPShellModule::CommandGroup sPlugins("plugins", "Plugin Manager");
+
+void Init() {
+    if(IOPShellModule::Init() != IOPSHELL_MODULE_ERROR_SUCCESS) return;
+
+    // 2. Add Sub-commands
+    // Usage: aroma plugins list
+    sPlugins.AddCommand("list", []() {
+        OSReport("Listing plugins...\n");
+    }, "Lists all installed plugins");
+
+    // Usage: aroma plugins install <string>
+    sPlugins.AddCommand("install", [](std::string path) {
+        OSReport("Installing plugin from %s\n", path.c_str());
+    }, "Installs a plugin");
+
+    // 3. Register the Main Command
+    // Returns an optional<Command> that must be stored to keep the registration active.
+    auto maybe_cmd = sPlugins.Register();
+    if (maybe_cmd) sCommands.push_back(std::move(*maybe_cmd));
+}
+```
+
 ### C API
 
 If you prefer pure C or need to interface from a C-only project:
@@ -257,6 +290,10 @@ void DeinitShell() {
 
 * **`Init()`**: Initializes the library.
 * **`DeInit()`**: Closes the library.
+* **`IOPSHELL_REGISTER_ENUM(Type, ...)`**: Macro to register Enum-to-String mappings.
+
+#### CommandRegistry
+
 * **`CommandRegistry::Add<Func>(name, description, [outError])`**: Registers a C++ function. Argument parsing is
   automated.
 * **`CommandRegistry::Add(name, lambda, description, [outError])`**: Registers a lambda with automatic signature
@@ -264,9 +301,19 @@ void DeinitShell() {
 * **`CommandRegistry::Add<Signature>(name, lambda, description, [outError])`**: Registers a lambda with an explicit
   signature.
 * **`CommandRegistry::Add(name, description, callback, [outError])`**: Registers a raw `argc`/`argv` callback.
+* **`CommandRegistry::AddRaw(name, handler, description, [outError])`**: Registers a raw command handler (
+  argc/argv). Supports capturing lambdas.
 * **`CommandRegistry::Remove(name)`**: Unregisters a command.
 * **`CommandRegistry::List()`**: Returns a `std::vector` of all registered commands.
-* **`IOPSHELL_REGISTER_ENUM(Type, ...)`**: Macro to register Enum-to-String mappings.
+
+#### CommandGroup
+
+Class for managing sub-commands (e.g., `cmd subcmd`).
+
+* **`CommandGroup::CommandGroup(name, description)`**: Creates a group.
+* **`CommandGroup::AddCommand(name, lambda, description)`**: Registers a sub-command with automatic type deduction.
+* **`CommandGroup::AddRawCommand(name, handler, description)`**: Registers a raw sub-command.
+* **`CommandGroup::Register()`**: Registers the main command with the shell. Returns `std::optional<Command>`.
 
 ### C API
 
