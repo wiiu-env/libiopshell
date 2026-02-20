@@ -1,3 +1,4 @@
+#include "ConsoleTable.h"
 #include "iopshell/api.h"
 #include "iopshell/defines.h"
 #include "logger.h"
@@ -205,8 +206,7 @@ namespace IOPShellModule {
 
         // Register the Global Dispatcher with the C API
         // This dispatcher looks up the handler in the map and calls it.
-        IOPShellModule_Error res = IOPShellModule_AddCommand(name, &GlobalLambdaDispatcher, description, usage);
-
+        const IOPShellModule_Error res = IOPShellModule_AddCommand(name, &GlobalLambdaDispatcher, description, usage);
         if (res == IOPSHELL_MODULE_ERROR_SUCCESS) {
             if (outError) *outError = IOPSHELL_MODULE_ERROR_SUCCESS;
             return Command(name); // CommandRegistry is a friend of Command, so this works
@@ -218,28 +218,125 @@ namespace IOPShellModule {
             GetHandlerMap().erase(name);
         }
 
+        if (outError) {
+            *outError = res;
+        }
+        return std::nullopt;
+    }
+
+    std::optional<Command> CommandRegistry::AddAlias(const Command &target, const char *alias, IOPShellModule_Error *outError) {
+        std::lock_guard lock(GetMutex());
+
+        if (target.mName.empty()) {
+            if (outError) *outError = IOPSHELL_MODULE_ERROR_INVALID_ARGUMENT;
+            return std::nullopt;
+        }
+
+        auto &map = GetHandlerMap();
+
+        const auto it = map.find(target.mName);
+        if (it == map.end()) {
+            if (outError) *outError = IOPSHELL_MODULE_ERROR_INVALID_ARGUMENT;
+            return std::nullopt;
+        }
+
+        map[alias]               = it->second;
+        IOPShellModule_Error res = IOPShellModule_AddCommandEx(alias, &GlobalLambdaDispatcher, nullptr, nullptr, false);
+
+        if (res == IOPSHELL_MODULE_ERROR_SUCCESS) {
+            if (outError) *outError = IOPSHELL_MODULE_ERROR_SUCCESS;
+            return Command(alias);
+        }
+
+        map.erase(alias);
         if (outError) *outError = res;
         return std::nullopt;
     }
 
     CommandGroup::CommandGroup(std::string name, std::string description)
-        : mName(std::move(name)), mDescription(std::move(description)) {}
+        : mName(std::move(name)), mFullCmdPath(mName), mDescription(std::move(description)) {}
 
     CommandGroup::~CommandGroup() = default;
 
-    void CommandGroup::AddRawHandler(const char *name, std::function<void(int, char **)> handler, const char *desc, std::string usage) {
-        if (!name) return;
+    IOPShellModule_Error CommandGroup::AddRawHandler(const char *name, std::function<void(int, char **)> handler, const char *desc, std::string usage) {
+        if (!name || !handler) {
+            return IOPSHELL_MODULE_ERROR_INVALID_ARGUMENT;
+        }
+        if (mHandlers.contains(name)) {
+            return IOPSHELL_MODULE_ERROR_ALREADY_EXISTS;
+        }
         mHandlers[name] = std::move(handler);
         mHelp[name]     = {desc ? desc : "", std::move(usage)};
+        return IOPSHELL_MODULE_ERROR_SUCCESS;
     }
 
-    std::optional<Command> CommandGroup::Register() {
-        // Use AddRaw to register the lambda with skipped template deduction and argument parsing logic.
-        return CommandRegistry::AddRaw(
-                mName.c_str(), [this](int argc, char **argv) {
-                    this->Dispatch(argc, argv);
+    IOPShellModule_Error CommandGroup::AddSubGroup(std::unique_ptr<CommandGroup> childGroup) {
+        // Validate without taking ownership
+        if (!childGroup) {
+            return IOPSHELL_MODULE_ERROR_INVALID_ARGUMENT;
+        }
+        if (childGroup->mCommand) {
+            return IOPSHELL_MODULE_ERROR_ALREADY_EXISTS;
+        }
+
+        childGroup->UpdatePath(this->mFullCmdPath);
+
+        CommandGroup *childPtr = childGroup.get();
+
+        std::string usageStr = "Type 'aroma " + childPtr->mFullCmdPath + " help' to see subcommands.";
+
+        // Try to register it
+        const IOPShellModule_Error res = AddRawHandler(
+                childPtr->mName.c_str(),
+                [childPtr](int argc, char **argv) {
+                    childPtr->Dispatch(argc, argv);
                 },
-                mDescription.c_str(), (std::string("Type '") + mName + " help' to see subcommands.").c_str());
+                childPtr->mDescription.c_str(),
+                std::move(usageStr));
+
+        if (res != IOPSHELL_MODULE_ERROR_SUCCESS) {
+            return res;
+        }
+
+        mSubGroups.push_back(std::move(childGroup));
+
+        return IOPSHELL_MODULE_ERROR_SUCCESS;
+    }
+    IOPShellModule_Error CommandGroup::AddAlias(const char *target, const char *alias) {
+        if (!target || !alias) {
+            return IOPSHELL_MODULE_ERROR_INVALID_ARGUMENT;
+        }
+        const auto it = mHandlers.find(target);
+        if (it == mHandlers.end()) {
+            return IOPSHELL_MODULE_ERROR_UNKNOWN_OR_FOREIGN_CMD;
+        }
+
+        mHandlers[alias] = it->second;
+        return IOPSHELL_MODULE_ERROR_SUCCESS;
+    }
+
+    IOPShellModule_Error CommandGroup::RegisterGroup() {
+        if (mCommand) {
+            return IOPSHELL_MODULE_ERROR_ALREADY_EXISTS;
+        }
+        // Use AddRaw to register the lambda with skipped template deduction and argument parsing logic.
+        IOPShellModule_Error err = IOPSHELL_MODULE_ERROR_UNKNOWN_ERROR;
+        auto commandOpt          = CommandRegistry::AddRaw(
+                         mName.c_str(), [this](int argc, char **argv) {
+                    this->Dispatch(argc, argv);
+                         },
+                         mDescription.c_str(), (std::string("Type '") + mName + " help' to see subcommands.").c_str(), &err);
+        if (!commandOpt || err != IOPSHELL_MODULE_ERROR_SUCCESS)
+            return err;
+
+        mCommand = std::move(commandOpt);
+
+        return IOPSHELL_MODULE_ERROR_SUCCESS;
+    }
+
+    IOPShellModule_Error CommandGroup::RemoveGroup() {
+        mCommand.reset();
+        return IOPSHELL_MODULE_ERROR_SUCCESS;
     }
 
     void CommandGroup::Dispatch(int argc, char **argv) {
@@ -251,7 +348,7 @@ namespace IOPShellModule {
             return;
         }
 
-        std::string sub = argv[1];
+        const std::string sub = argv[1];
 
         // Built-in help check
         if (sub == "help" || sub == "--help" || sub == "-h") {
@@ -259,25 +356,41 @@ namespace IOPShellModule {
             return;
         }
 
-        auto it = mHandlers.find(sub);
-        if (it != mHandlers.end()) {
+        if (const auto it = mHandlers.find(sub); it != mHandlers.end()) {
             // Shift arguments:
             // Sub-command handler expects argv[0] to be its own name
             // "plugins show 123" -> "show 123"
             it->second(argc - 1, argv + 1);
         } else {
-            OSReport("Unknown subcommand '%s'. Try '%s help'.\n", sub.c_str(), mName.c_str());
+            OSReport("Unknown subcommand '%s'. Try '%s help'.\n", sub.c_str(), mFullCmdPath.c_str());
         }
     }
 
     void CommandGroup::PrintHelp() {
-        OSReport("Usage: aroma %s <subcommand> [args]\n", mName.c_str());
-        OSReport("Subcommands:\n");
+        OSReport("Usage: aroma %s <subcommand> [args]\n", mFullCmdPath.c_str());
+        ConsoleTable table;
+
+        table.AddColumn("Subcommand", ConsoleTable::LEFT, 20);
+        table.AddColumn("Description", ConsoleTable::LEFT, 70);
+        table.AddColumn("Usage", ConsoleTable::LEFT, 70);
 
         for (const auto &[name, info] : mHelp) {
-            char buf[256];
-            snprintf(buf, sizeof(buf), "  %-20s %-20s %s", name.c_str(), info.desc.c_str(), info.usage.c_str());
-            OSReport("\t - %s\n", buf);
+            table.AddRow({name, info.desc, info.usage});
+        }
+
+        table.Print();
+    }
+
+    void CommandGroup::UpdatePath(const std::string &parentPath) {
+        mFullCmdPath = parentPath + " " + mName;
+
+        for (const auto &child : mSubGroups) {
+            child->UpdatePath(mFullCmdPath);
+
+            if (auto it = mHelp.find(child->mName); it != mHelp.end()) {
+                it->second.usage = "Type 'aroma " + child->mFullCmdPath + " help' to see subcommands.";
+            }
         }
     }
+
 } // namespace IOPShellModule

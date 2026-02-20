@@ -9,10 +9,10 @@
 
 static OSDynLoad_Module sModuleHandle = nullptr;
 
-static IOPShellModule_Error (*sISMGetVersionFn)(IOPShellModule_APIVersion *)                                                                = nullptr;
-static IOPShellModule_Error (*sISMListCommands)(IOPShellModule_CommandEntry *outList, uint32_t bufferSize, uint32_t *outCount)              = nullptr;
-static IOPShellModule_Error (*sISMAddCommand)(const char *cmdName, IOPShell_CommandCallback cb, const char *description, const char *usage) = nullptr;
-static IOPShellModule_Error (*sISMRemoveCommand)(const char *cmdName)                                                                       = nullptr;
+static IOPShellModule_Error (*sISMGetVersionFn)(IOPShellModule_APIVersion *)                                                                                 = nullptr;
+static IOPShellModule_Error (*sISMListCommands)(IOPShellModule_CommandEntry *outList, uint32_t bufferSize, uint32_t *outCount)                               = nullptr;
+static IOPShellModule_Error (*sISMAddCommand)(const char *cmdName, IOPShell_CommandCallback cb, const char *description, const char *usage, bool showInHelp) = nullptr;
+static IOPShellModule_Error (*sISMRemoveCommand)(const char *cmdName)                                                                                        = nullptr;
 
 static bool sLibInitDone                                = false;
 static IOPShellModule_APIVersion sIOPShellModuleVersion = IOPSHELL_MODULE_API_VERSION_ERROR;
@@ -196,7 +196,7 @@ IOPShellModule_Error IOPShellModule_GetVersion(IOPShellModule_APIVersion *outVer
 }
 
 
-IOPShellModule_Error IOPShellModule_AddCommand(const char *cmdName, IOPShell_CommandCallback cb, const char *description, const char *usage) {
+IOPShellModule_Error IOPShellModule_AddCommandEx(const char *cmdName, IOPShell_CommandCallback cb, const char *description, const char *usage, bool showInHelp) {
     if (sIOPShellModuleVersion == IOPSHELL_MODULE_API_VERSION_ERROR) {
         return IOPSHELL_MODULE_ERROR_LIB_UNINITIALIZED;
     }
@@ -208,7 +208,7 @@ IOPShellModule_Error IOPShellModule_AddCommand(const char *cmdName, IOPShell_Com
         return IOPSHELL_MODULE_ERROR_INVALID_ARGUMENT;
     }
 
-    const IOPShellModule_Error ret = sISMAddCommand(cmdName, cb, description, usage);
+    const IOPShellModule_Error ret = sISMAddCommand(cmdName, cb, description, usage, showInHelp);
 
     if (ret == IOPSHELL_MODULE_ERROR_SUCCESS) {
         OSLockMutex(&sTrackingMutex);
@@ -231,6 +231,10 @@ IOPShellModule_Error IOPShellModule_AddCommand(const char *cmdName, IOPShell_Com
     }
 
     return ret;
+}
+
+IOPShellModule_Error IOPShellModule_AddCommand(const char *cmdName, IOPShell_CommandCallback cb, const char *description, const char *usage) {
+    return IOPShellModule_AddCommandEx(cmdName, cb, description, usage, true);
 }
 
 IOPShellModule_Error IOPShellModule_RemoveCommand(const char *cmdName) {
