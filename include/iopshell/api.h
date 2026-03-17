@@ -81,6 +81,7 @@ IOPShellModule_Error IOPShellModule_GetVersion(IOPShellModule_APIVersion *outVer
  * @retval IOPSHELL_MODULE_ERROR_UNSUPPORTED_COMMAND  The backend version is too old or missing the register export.
  */
 IOPShellModule_Error IOPShellModule_AddCommand(const char *cmdName, IOPShell_CommandCallback cb, const char *description, const char *usage);
+IOPShellModule_Error IOPShellModule_AddCommandEx(const char *cmdName, IOPShell_CommandCallback cb, const char *description, const char *usage, bool showInHelp);
 
 /**
  * @brief Removes a previously registered command from the shell.
@@ -759,6 +760,15 @@ namespace IOPShellModule {
         [[nodiscard]] static std::optional<Command> AddRaw(const char *name, std::function<void(int, char **)> handler, const char *description = nullptr, const char *usage = nullptr, IOPShellModule_Error *outError = nullptr);
 
         /**
+         * @brief Registers an alias for an existing C++ command.
+         * @param alias The new command name.
+         * @param target The existing command name to point to.
+         * @param outError Optional error output.
+         * @return std::optional<Command> RAII handle for the alias.
+         */
+        [[nodiscard]] static std::optional<Command> AddAlias(const Command &target, const char *alias, IOPShellModule_Error *outError = nullptr);
+
+        /**
          * @brief Unregisters a command.
          * \see IOPShellModule_RemoveCommand
          */
@@ -837,32 +847,49 @@ namespace IOPShellModule {
         CommandGroup(std::string name, std::string description = "");
         ~CommandGroup();
 
-        // Delete copy/move to ensure 'this' captured in Register() remains valid.
+        // Delete copy/move to ensure 'this' captured in RegisterGroup() remains valid.
         CommandGroup(const CommandGroup &) = delete;
+        CommandGroup(CommandGroup &&)      = delete;
         CommandGroup &operator=(const CommandGroup &) = delete;
+
+        /**
+         * @brief Nests another CommandGroup as a subcommand.
+         * On success, this group takes ownership of childGroup.
+         * On failure, ownership remains with the caller.
+         */
+        IOPShellModule_Error AddSubGroup(std::unique_ptr<CommandGroup> childGroup);
 
         /**
          * @brief Registers a raw command handler (argc/argv).
          * Bypasses the library's automatic argument parsing and type deduction.
          */
-        void AddRawCommand(const char *name, std::function<void(int, char **)> handler, const char *description = nullptr, const char *usage = nullptr) {
-            AddRawHandler(name, std::move(handler), description, usage ? usage : "");
+        IOPShellModule_Error AddRawCommand(const char *name, std::function<void(int, char **)> handler, const char *description = nullptr, const char *usage = nullptr) {
+            return AddRawHandler(name, std::move(handler), description, usage ? usage : "");
         }
 
         /**
          * @brief Registers a sub-command with automatic type deduction.
          */
         template<typename FuncT>
-        void AddCommand(const char *subCmdName, FuncT &&lambda, const char *description = nullptr) {
+        IOPShellModule_Error AddCommand(const char *subCmdName, FuncT &&lambda, const char *description = nullptr) {
             using Sig = typename internal::SignatureDeducer<std::decay_t<FuncT>>::Signature;
-            AddCommandExplicit<Sig>(subCmdName, std::forward<FuncT>(lambda), description);
+            return AddCommandExplicit<Sig>(subCmdName, std::forward<FuncT>(lambda), description);
         }
+        /**
+         * @brief Registers an alias for an existing command object.
+         * Creates a new shell command that points to the same underlying handler
+         * as the target command.
+         * @param target The existing Command object to alias.
+         * @param alias The new command name for the alias.
+         * @return IOPShellModule_Error
+        */
+        IOPShellModule_Error AddAlias(const char *target, const char *alias);
 
         /**
          * @brief Registers a sub-command with an explicit signature.
          */
         template<typename Signature, typename FuncT>
-        void AddCommandExplicit(const char *subCmdName, FuncT &&lambda, const char *description = nullptr) {
+        IOPShellModule_Error AddCommandExplicit(const char *subCmdName, FuncT &&lambda, const char *description = nullptr) {
             using Traits = internal::FunctionTraits<Signature>;
 
             auto shared_lambda = std::make_shared<std::decay_t<FuncT>>(std::forward<FuncT>(lambda));
@@ -872,14 +899,19 @@ namespace IOPShellModule {
 
             std::string usage = Traits::GetUsage(subCmdName);
 
-            AddRawHandler(subCmdName, std::move(handler), description, std::move(usage));
+            return AddRawHandler(subCmdName, std::move(handler), description, std::move(usage));
         }
 
         /**
          * @brief Registers the MAIN command with the IOPShell.
          * Call this after adding all sub-commands.
          */
-        [[nodiscard]] std::optional<Command> Register();
+        [[nodiscard]] IOPShellModule_Error RegisterGroup();
+
+        /**
+         * @brief Removes the MAIN command from the IOPShell.
+         */
+        [[nodiscard]] IOPShellModule_Error RemoveGroup();
 
     private:
         struct HelpEntry {
@@ -888,15 +920,22 @@ namespace IOPShellModule {
         };
 
         // Helper to keep implementation details out of the header template
-        void AddRawHandler(const char *name, std::function<void(int, char **)> handler, const char *desc, std::string usage);
+        IOPShellModule_Error AddRawHandler(const char *name, std::function<void(int, char **)> handler, const char *desc, std::string usage);
 
         void Dispatch(int argc, char **argv);
         void PrintHelp();
 
+        void UpdatePath(const std::string &parentPath);
+
+
         std::string mName;
+        std::string mFullCmdPath;
         std::string mDescription;
+        std::optional<Command> mCommand;
+
         std::map<std::string, std::function<void(int, char **)>> mHandlers;
         std::map<std::string, HelpEntry> mHelp;
+        std::vector<std::unique_ptr<CommandGroup>> mSubGroups;
     };
 
 } // namespace IOPShellModule

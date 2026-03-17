@@ -13,6 +13,7 @@ typedef struct {
     char description[IOPSHELL_MAX_CMD_DESC];
     char usage[IOPSHELL_MAX_CMD_USAGE];
     IOPShell_CommandCallback callback;
+    bool shownInHelp;
 } IOPShellModule_CommandEntry;
 
 typedef enum IOPShellModule_Error {

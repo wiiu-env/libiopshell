@@ -219,34 +219,53 @@ void Init() {
 
 #### 5. Command Groups (Sub-commands)
 
-You can organize related commands under a single parent command using `CommandGroup`. This creates a structure similar
-to CLI tools (e.g., `git commit`, `git push`).
+You can organize related commands under a single parent command using `CommandGroup`. This creates a structure similar to CLI tools (e.g., `git commit`, `git push`).
 
-**Note:** The `CommandGroup` object stores the sub-command handlers internally. It must **remain alive** (e.g., static
-or heap-allocated) for as long as the command is registered.
+**Note:** The `CommandGroup` object internally manages its own `Command` registration and stores the sub-command handlers. 
+The instance must **remain alive** (e.g., wrapped in a `std::unique_ptr` or as a static variable) for as long as you want the command to be available.
 
-```
-// 1. Define the Group (Must be persistent)
-static IOPShellModule::CommandGroup sPlugins("plugins", "Plugin Manager");
+```cpp
+#include <memory>
 
-void Init() {
+// 1. Define the Group pointer (Must remain in memory while active)
+static std::unique_ptr<IOPShellModule::CommandGroup> sPluginsGroup;
+
+void InitPluginsCommandGroup() {
     if(IOPShellModule::Init() != IOPSHELL_MODULE_ERROR_SUCCESS) return;
+
+    // Instantiate the group "plugins"
+    sPluginsGroup = std::make_unique<IOPShellModule::CommandGroup>("plugins", "Manage aroma plugins");
 
     // 2. Add Sub-commands
     // Usage: aroma plugins list
-    sPlugins.AddCommand("list", []() {
-        OSReport("Listing plugins...\n");
-    }, "Lists all installed plugins");
+    if (const auto res = sPluginsGroup->AddCommand(
+            "list", 
+            []() { OSReport("Listing plugins...\n"); },
+            "Lists all active plugins");
+        res != IOPSHELL_MODULE_ERROR_SUCCESS) {
+        OSReport("Failed to add sub command \"list\"");
+    }
 
-    // Usage: aroma plugins install <string>
-    sPlugins.AddCommand("install", [](std::string path) {
-        OSReport("Installing plugin from %s\n", path.c_str());
-    }, "Installs a plugin");
+    // Add aliases for subcommands
+    if (const auto res = sPluginsGroup->AddAlias(
+            "list", 
+            "show"); 
+        res != IOPSHELL_MODULE_ERROR_SUCCESS) {
+        OSReport("Failed to add alias \"show\" for command \"list\"");
+    }
 
-    // 3. Register the Main Command
-    // Returns an optional<Command> that must be stored to keep the registration active.
-    auto maybe_cmd = sPlugins.Register();
-    if (maybe_cmd) sCommands.push_back(std::move(*maybe_cmd));
+    // 3. Register the Main Command with the shell
+    // The CommandGroup internally manages the RAII Command wrapper.
+    if (const auto res = sPluginsGroup->RegisterGroup(); 
+            res != IOPSHELL_MODULE_ERROR_SUCCESS) {
+        OSReport("Failed to register 'aroma plugins' command: %s\n", IOPShellModule::GetErrorString(res));
+    }
+}
+
+void DeInitPluginsCommandGroup() {
+    // Destroying the object automatically unregisters the main command 
+    // and cleans up all subcommand handlers.
+    sPluginsGroup.reset();
 }
 ```
 
